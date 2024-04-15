@@ -53,3 +53,4 @@ Thumbs.db
 # CEF generated files
 /include/cef_version.h
 .ccls-cache/
+.idea/
