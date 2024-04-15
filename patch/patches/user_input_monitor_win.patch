@@ -1,0 +1,55 @@
+diff --git media/base/user_input_monitor_win.cc media/base/user_input_monitor_win.cc
+index 42aed948d7c88..44937136fe3da 100644
+--- media/base/user_input_monitor_win.cc
++++ media/base/user_input_monitor_win.cc
+@@ -122,9 +122,6 @@ class UserInputMonitorWin : public UserInputMonitorBase {
+   void StartKeyboardMonitoring(
+       base::WritableSharedMemoryMapping mapping) override;
+   void StopKeyboardMonitoring() override;
+-
+-  scoped_refptr<base::SingleThreadTaskRunner> ui_task_runner_;
+-  raw_ptr<UserInputMonitorWinCore> core_;
+ };
+
+ UserInputMonitorWinCore::UserInputMonitorWinCore(
+@@ -307,37 +304,24 @@ bool UserInputMonitorWinCore::HandleMessage(UINT message,
+ //
+
+ UserInputMonitorWin::UserInputMonitorWin(
+-    const scoped_refptr<base::SingleThreadTaskRunner>& ui_task_runner)
+-    : ui_task_runner_(ui_task_runner),
+-      core_(new UserInputMonitorWinCore(ui_task_runner)) {}
++    const scoped_refptr<base::SingleThreadTaskRunner>& ui_task_runner) {
++}
+ 
+ UserInputMonitorWin::~UserInputMonitorWin() {
+-  if (!ui_task_runner_->DeleteSoon(FROM_HERE, core_.get()))
+-    delete core_;
+ }
+ 
+ uint32_t UserInputMonitorWin::GetKeyPressCount() const {
+-  return core_->GetKeyPressCount();
++  return 0;
+ }
+ 
+ void UserInputMonitorWin::StartKeyboardMonitoring() {
+-  ui_task_runner_->PostTask(
+-      FROM_HERE, base::BindOnce(&UserInputMonitorWinCore::StartMonitor,
+-                                core_->AsWeakPtr()));
+ }
+ 
+ void UserInputMonitorWin::StartKeyboardMonitoring(
+     base::WritableSharedMemoryMapping mapping) {
+-  ui_task_runner_->PostTask(
+-      FROM_HERE,
+-      base::BindOnce(&UserInputMonitorWinCore::StartMonitorWithMapping,
+-                     core_->AsWeakPtr(), std::move(mapping)));
+ }
+ 
+ void UserInputMonitorWin::StopKeyboardMonitoring() {
+-  ui_task_runner_->PostTask(
+-      FROM_HERE, base::BindOnce(&UserInputMonitorWinCore::StopMonitor,
+-                                core_->AsWeakPtr()));
+ }
+ 
+ }  // namespace
