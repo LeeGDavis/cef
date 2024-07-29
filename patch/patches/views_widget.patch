@@ -244,6 +244,53 @@ index baa69932bda9216f0f0e4e1d187676195ede219a..a4a91644304be4bf0fbe36822801e2de
    window->AddObserver(this);
    // Remember this mapping from hwnd to Window*.
    hwnd_root_window_map_[root_window_hwnd] = window;
+diff --git ui/aura/window_tree_host_platform.cc ui/aura/window_tree_host_platform.cc
+index 122e8b50e2dda3c082460af9adaa9e72560aa6f1..869a2621a479b29c54ae432dcc4170ca953f508f 100644
+--- ui/aura/window_tree_host_platform.cc
++++ ui/aura/window_tree_host_platform.cc
+@@ -254,6 +254,16 @@ void WindowTreeHostPlatform::SetPlatformWindowFactoryDelegateForTesting(
+   g_platform_window_factory_delegate_for_testing = delegate;
+ }
+ 
++#if BUILDFLAG(IS_LINUX)
++bool WindowTreeHostPlatform::HasExternalParent() const {
++  return has_external_parent_;
++}
++
++void WindowTreeHostPlatform::SetHasExternalParent(bool has_external_parent) {
++  has_external_parent_ = has_external_parent;
++}
++#endif
++
+ void WindowTreeHostPlatform::OnBoundsChanged(const BoundsChange& change) {
+   // It's possible this function may be called recursively. Only notify
+   // observers on initial entry. This way observers can safely assume that
+diff --git ui/aura/window_tree_host_platform.h ui/aura/window_tree_host_platform.h
+index 20b1f3b112ae6a4a5e36d44cc226701d350778d3..30cdd83cb9f7e4db853dec3137c2d14d804fe13e 100644
+--- ui/aura/window_tree_host_platform.h
++++ ui/aura/window_tree_host_platform.h
+@@ -72,6 +72,11 @@ class AURA_EXPORT WindowTreeHostPlatform : public WindowTreeHost,
+   static void SetPlatformWindowFactoryDelegateForTesting(
+       PlatformWindowFactoryDelegateForTesting* delegate);
+ 
++  #if BUILDFLAG(IS_LINUX)
++    bool HasExternalParent() const override;
++    void SetHasExternalParent(bool has_external_parent) override;
++  #endif
++
+  protected:
+   // NOTE: this does not call CreateCompositor(); subclasses must call
+   // CreateCompositor() at the appropriate time.
+@@ -132,6 +137,9 @@ class AURA_EXPORT WindowTreeHostPlatform : public WindowTreeHost,
+   // OnBoundsChanged() this is incremented and on leaving OnBoundsChanged() this
+   // is decremented.
+   int on_bounds_changed_recursion_depth_ = 0;
++  #if BUILDFLAG(IS_LINUX)
++    bool has_external_parent_ = false;
++  #endif
+ };
+ 
+ }  // namespace aura
 diff --git ui/base/mojom/window_show_state.mojom ui/base/mojom/window_show_state.mojom
 index aeaf8e35f7eda89598149117fe8508d197bf2610..4b7cc3f03d3cf9c91ac8efe11ae820cf2b34b8b0 100644
 --- ui/base/mojom/window_show_state.mojom
@@ -258,10 +305,20 @@ index aeaf8e35f7eda89598149117fe8508d197bf2610..4b7cc3f03d3cf9c91ac8efe11ae820cf
 +  [MinVersion=1] kEnd = 7,
  };
 diff --git ui/ozone/platform/x11/x11_window.cc ui/ozone/platform/x11/x11_window.cc
-index 2459a05b3caadbe1e8c024e8cf0044b01761e1dd..2ae6fc1b9a8fe7bbc6a4ac9835df42dc2e8239aa 100644
+index 2459a05b3caadbe1e8c024e8cf0044b01761e1dd..db0360131d868974283abb68386c7dd8f29e8dc3 100644
 --- ui/ozone/platform/x11/x11_window.cc
 +++ ui/ozone/platform/x11/x11_window.cc
-@@ -1943,7 +1943,17 @@ void X11Window::CreateXWindow(const PlatformWindowInitProperties& properties) {
+@@ -836,7 +836,8 @@ PlatformWindowState X11Window::GetPlatformWindowState() const {
+ }
+ 
+ void X11Window::Activate() {
+-  if (!IsVisible() || !activatable_) {
++  if (!IsVisible() || !activatable_ ||
++    platform_window_delegate_->HasExternalParent()) {
+     return;
+   }
+ 
+@@ -1943,7 +1944,22 @@ void X11Window::CreateXWindow(const PlatformWindowInitProperties& properties) {
    req.border_pixel = 0;
  
    last_set_bounds_px_ = SanitizeBounds(bounds);
@@ -271,15 +328,61 @@ index 2459a05b3caadbe1e8c024e8cf0044b01761e1dd..2ae6fc1b9a8fe7bbc6a4ac9835df42dc
 +  // for OSR (off-screen rendering) scenarios where the parent is an external
 +  // window. Other window types maintain their normal parent relationship.
 +  if (properties.type == ui::PlatformWindowType::kMenu) {
-+    req.parent = x_root_window_;
++    req.parent = properties.parent_widget == gfx::kNullAcceleratedWidget
++      ? x_root_window_
++      : static_cast<x11::Window>(properties.parent_widget);
++    if (properties.parent_widget != gfx::kNullAcceleratedWidget) {
++      platform_window_delegate_->SetHasExternalParent(true);
++    }
 +  } else {
 +    req.parent = properties.parent_widget == gfx::kNullAcceleratedWidget
-+                     ? x_root_window_
-+                     : static_cast<x11::Window>(properties.parent_widget);
++      ? x_root_window_
++      : static_cast<x11::Window>(properties.parent_widget);
 +  }
    req.x = last_set_bounds_px_.x();
    req.y = last_set_bounds_px_.y();
    req.width = last_set_bounds_px_.width();
+@@ -2230,7 +2246,11 @@ void X11Window::OnCrossingEvent(bool enter,
+     // window or the PointerRoot is focused) && |has_pointer_|.  Therefore, we
+     // can just use |has_pointer_| in the assignment.  The transitions for when
+     // the focus changes are handled in OnFocusEvent().
+-    has_pointer_focus_ = has_pointer_;
++    // On the other hand, if platform_window_delegate_->HasExternalParent() is
++    // true, we don't want to steal focus from the toolkits when mouse enters
++    // web view. It must click.
++    has_pointer_focus_ =
++      has_pointer_ && !platform_window_delegate_->HasExternalParent();
+   }
+ 
+   AfterActivationStateChanged();
+diff --git ui/platform_window/platform_window_delegate.cc ui/platform_window/platform_window_delegate.cc
+index 52d4ae6242ad1b71e8e5768cc2769be277d242f5..73f537ca5f7d5e3e4adc26ab6d65fb4376601224 100644
+--- ui/platform_window/platform_window_delegate.cc
++++ ui/platform_window/platform_window_delegate.cc
+@@ -61,6 +61,10 @@ gfx::Insets PlatformWindowDelegate::CalculateInsetsInDIP(
+ #if BUILDFLAG(IS_LINUX)
+ void PlatformWindowDelegate::OnWindowTiledStateChanged(
+     WindowTiledEdges new_tiled_edges) {}
++bool PlatformWindowDelegate::HasExternalParent() const {
++  return false;
++}
++void PlatformWindowDelegate::SetHasExternalParent(bool has_external_parent) {}
+ #endif
+ 
+ std::optional<gfx::Size> PlatformWindowDelegate::GetMinimumSizeForWindow()
+diff --git ui/platform_window/platform_window_delegate.h ui/platform_window/platform_window_delegate.h
+index 2ba67bf9f9f836dac61d590a788169f16b550a64..1e58b9b23e29ea1a0da79fae8b7a6f3b2c87c378 100644
+--- ui/platform_window/platform_window_delegate.h
++++ ui/platform_window/platform_window_delegate.h
+@@ -149,6 +149,8 @@ class COMPONENT_EXPORT(PLATFORM_WINDOW) PlatformWindowDelegate {
+ #if BUILDFLAG(IS_LINUX)
+   // Notifies the delegate that the tiled state of the window edges has changed.
+   virtual void OnWindowTiledStateChanged(WindowTiledEdges new_tiled_edges);
++  virtual bool HasExternalParent() const;
++  virtual void SetHasExternalParent(bool has_external_parent);
+ #endif
+ 
+   enum RotateDirection {
 diff --git ui/views/widget/desktop_aura/desktop_screen_win.cc ui/views/widget/desktop_aura/desktop_screen_win.cc
 index 077855979045d4862abd099ec16befa0fcecff65..69f369b06c29e65dead98a52cc8b743ee81b2b7c 100644
 --- ui/views/widget/desktop_aura/desktop_screen_win.cc
@@ -373,11 +476,16 @@ index d440180f99339d3d9da1468ad0e5bf07a141c220..f4f7b69b2d843b8caf6edaef5312fe46
    base::WeakPtrFactory<DesktopWindowTreeHostLinux> weak_factory_{this};
  };
 diff --git ui/views/widget/desktop_aura/desktop_window_tree_host_platform.cc ui/views/widget/desktop_aura/desktop_window_tree_host_platform.cc
-index 0254e2ddad745b5d7b16fd9d7514cf7eb7e0e6a8..6f5e7665c2c50a7bde07b2865269755548506f5e 100644
+index 0254e2ddad745b5d7b16fd9d7514cf7eb7e0e6a8..d102b8c5bf6e0d779df1574f4bc4e85cb0ec25d3 100644
 --- ui/views/widget/desktop_aura/desktop_window_tree_host_platform.cc
 +++ ui/views/widget/desktop_aura/desktop_window_tree_host_platform.cc
-@@ -281,8 +281,8 @@ void DesktopWindowTreeHostPlatform::Init(const Widget::InitParams& params) {
+@@ -279,10 +279,13 @@ void DesktopWindowTreeHostPlatform::Init(const Widget::InitParams& params) {
+   // data during destruction to make sure that when we try to close a parent
+   // window, we also destroy all child windows.
    if (properties.parent_widget) {
++    #if BUILDFLAG(IS_LINUX)
++      SetHasExternalParent(true);
++    #endif
      window_parent_ = DesktopWindowTreeHostPlatform::GetHostForWidget(
          properties.parent_widget);
 -    DCHECK(window_parent_);
